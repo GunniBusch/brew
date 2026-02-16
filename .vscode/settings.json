@@ -25,7 +25,7 @@
   "spellright.documentTypes": [
     "markdown",
   ],
-  "rubyLsp.customRubyCommand": "source ../../.vscode/ruby-lsp-activate.sh",
+  "rubyLsp.customRubyCommand": "source ${workspaceFolder}/.vscode/ruby-lsp-activate.sh",
   "rubyLsp.bundleGemfile": "Library/Homebrew/Gemfile",
   "rubyLsp.formatter": "rubocop",
   "[ruby]": {

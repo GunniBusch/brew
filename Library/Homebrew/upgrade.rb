@@ -14,6 +14,7 @@ module Homebrew
   module Upgrade
     extend Utils::Output::Mixin
 
+    # Upgrade/reinstall buckets for runtime dependents.
     class Dependents < T::Struct
       const :upgradeable, T::Array[Formula]
       const :pinned, T::Array[Formula]
@@ -114,13 +115,15 @@ module Homebrew
 
       sig { params(formula_installers: T::Array[FormulaInstaller], dry_run: T::Boolean, verbose: T::Boolean).void }
       def upgrade_formulae(formula_installers, dry_run: false, verbose: false)
-        valid_formula_installers = if dry_run
-          formula_installers
-        else
-          Install.fetch_formulae(formula_installers)
+        if dry_run
+          formula_installers.each do |fi|
+            upgrade_formula(fi, dry_run:, verbose:)
+            Cleanup.install_formula_clean!(fi.formula, dry_run:)
+          end
+          return
         end
 
-        valid_formula_installers.each do |fi|
+        Install.fetch_formulae(formula_installers) do |fi|
           upgrade_formula(fi, dry_run:, verbose:)
           Cleanup.install_formula_clean!(fi.formula, dry_run:)
         end

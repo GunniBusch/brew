@@ -329,8 +329,13 @@ module Homebrew
         end
       end
 
-      sig { params(formula_installers: T::Array[FormulaInstaller]).returns(T::Array[FormulaInstaller]) }
-      def fetch_formulae(formula_installers)
+      sig {
+        params(
+          formula_installers: T::Array[FormulaInstaller],
+          _block:             T.nilable(T.proc.params(arg0: FormulaInstaller).void),
+        ).returns(T::Array[FormulaInstaller])
+      }
+      def fetch_formulae(formula_installers, &_block)
         formulae_names_to_install = formula_installers.map { |fi| fi.formula.name }
         return formula_installers if formulae_names_to_install.empty?
 
@@ -343,21 +348,24 @@ module Homebrew
           end
         end
 
-        valid_formula_installers = formula_installers.dup
+        valid_formula_installers = []
+        fetch_steps = [:prelude_fetch, :prelude, :fetch].freeze
 
         begin
-          [:prelude_fetch, :prelude, :fetch].each do |step|
-            valid_formula_installers.select! do |fi|
+          formula_installers.each do |fi|
+            fi.download_queue = download_queue if download_queue
+
+            fetch_steps.each do |step|
               fi.public_send(step)
-              true
-            rescue CannotInstallFormulaError => e
-              ofail e.message
-              false
-            rescue UnsatisfiedRequirements, DownloadError, ChecksumMismatchError => e
-              ofail "#{fi.formula}: #{e}"
-              false
+              download_queue&.fetch
             end
-            download_queue&.fetch
+
+            valid_formula_installers << fi
+            yield fi if block_given?
+          rescue CannotInstallFormulaError => e
+            ofail e.message
+          rescue UnsatisfiedRequirements, DownloadError, ChecksumMismatchError => e
+            ofail "#{fi.formula}: #{e}"
           end
         ensure
           download_queue&.shutdown
@@ -414,7 +422,7 @@ module Homebrew
           return
         end
 
-        formula_installers.each do |fi|
+        fetch_formulae(formula_installers) do |fi|
           formula = fi.formula
           upgrade = formula.linked? && formula.outdated? && !formula.head? && !Homebrew::EnvConfig.no_install_upgrade?
           install_formula(fi, upgrade:)
