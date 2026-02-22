@@ -23,6 +23,8 @@ RSpec.describe ShardedRunnerMatrix, :no_api do
 
   let(:testball) { setup_test_runner_formula("testball") }
   let(:testball_depender) { setup_test_runner_formula("testball-depender", ["testball"]) }
+  let(:testball_depender_two) { setup_test_runner_formula("testball-depender-two", ["testball"]) }
+  let(:testball_depender_three) { setup_test_runner_formula("testball-depender-three", ["testball"]) }
   let(:testball_depender_linux) { setup_test_runner_formula("testball-depender-linux", ["testball", :linux]) }
   let(:testball_depender_macos) { setup_test_runner_formula("testball-depender-macos", ["testball", :macos]) }
   let(:testball_depender_newest) do
@@ -101,6 +103,27 @@ RSpec.describe ShardedRunnerMatrix, :no_api do
         runner_spec.exclude?(:shard_count) && runner_spec.exclude?(:shard_index)
       end)
     end
+
+    it "supports per-runner shard overrides" do
+      allow(Homebrew::EnvConfig).to receive(:eval_all?).and_return(true)
+      allow(Formula).to receive(:all).and_return(
+        [testball, testball_depender, testball_depender_two, testball_depender_three].map(&:formula),
+      )
+
+      runner_specs = described_class.new(
+        [testball], [],
+        all_supported:                    false,
+        dependent_matrix:                 true,
+        shard_max_runners:                3,
+        shard_max_runners_by_runner_type: { "linux-x86_64" => 1 },
+        shard_min_items_per_runner:       1,
+        shard_runner_load_factor:         1.0
+      ).active_runner_specs_hash
+
+      grouped_runner_specs = runner_specs.group_by { |runner_spec| runner_spec.fetch(:runner) }
+      expect(grouped_runner_specs.fetch("ubuntu-latest").count).to eq(1)
+      expect(grouped_runner_specs.fetch("ubuntu-22.04-arm").count).to eq(3)
+    end
   end
 
   describe "argument validation" do
@@ -124,6 +147,28 @@ RSpec.describe ShardedRunnerMatrix, :no_api do
           shard_min_items_per_runner: 0
         )
       end.to raise_error(ArgumentError, /shard_min_items_per_runner/)
+    end
+
+    it "raises for unknown runner types in override values" do
+      expect do
+        described_class.new(
+          [], ["deleted"],
+          all_supported:                    false,
+          dependent_matrix:                 true,
+          shard_max_runners_by_runner_type: { "linux-riscv64" => 2 }
+        )
+      end.to raise_error(ArgumentError, /unknown runner type/)
+    end
+
+    it "raises for invalid per-runner load-factor override values" do
+      expect do
+        described_class.new(
+          [], ["deleted"],
+          all_supported:                           false,
+          dependent_matrix:                        true,
+          shard_runner_load_factor_by_runner_type: { "linux-x86_64" => 0.0 }
+        )
+      end.to raise_error(ArgumentError, /greater than 0 and less than or equal to 1/)
     end
   end
 

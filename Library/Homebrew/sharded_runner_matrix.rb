@@ -34,9 +34,29 @@ class ShardedRunnerMatrix < GitHubRunnerMatrix
   DEFAULT_SHARD_COUNT_KEY = ShardCountKey::ShardCount
   DEFAULT_SHARD_INDEX_KEY = ShardIndexKey::ShardIndex
 
+  RUNNER_TYPE_KEYS = T.let(
+    %w[
+      linux-x86_64
+      linux-arm64
+      macos-arm64
+      macos-x86_64
+    ].freeze,
+    T::Array[String],
+  )
+
   MIN_SHARD_COUNT = 1
   SHARD_RUNNER_LOAD_FACTOR_MIN = 0.0
   SHARD_RUNNER_LOAD_FACTOR_MAX = 1.0
+
+  sig { returns(T::Array[String]) }
+  def self.runner_type_keys
+    RUNNER_TYPE_KEYS
+  end
+
+  sig { params(key: String).returns(T::Boolean) }
+  def self.valid_runner_type_key?(key)
+    RUNNER_TYPE_KEYS.include?(key)
+  end
 
   sig { params(value: Float).returns(T::Boolean) }
   def self.valid_shard_runner_load_factor?(value)
@@ -45,21 +65,27 @@ class ShardedRunnerMatrix < GitHubRunnerMatrix
 
   sig {
     params(
-      testing_formulae:           T::Array[TestRunnerFormula],
-      deleted_formulae:           T::Array[String],
-      all_supported:              T::Boolean,
-      dependent_matrix:           T::Boolean,
-      shard_max_runners:          Integer,
-      shard_min_items_per_runner: Integer,
-      shard_runner_load_factor:   Float,
-      shard_count_key:            ShardCountKey,
-      shard_index_key:            ShardIndexKey,
+      testing_formulae:                          T::Array[TestRunnerFormula],
+      deleted_formulae:                          T::Array[String],
+      all_supported:                             T::Boolean,
+      dependent_matrix:                          T::Boolean,
+      shard_max_runners:                         Integer,
+      shard_max_runners_by_runner_type:          T::Hash[String, Integer],
+      shard_min_items_per_runner:                Integer,
+      shard_min_items_per_runner_by_runner_type: T::Hash[String, Integer],
+      shard_runner_load_factor:                  Float,
+      shard_runner_load_factor_by_runner_type:   T::Hash[String, Float],
+      shard_count_key:                           ShardCountKey,
+      shard_index_key:                           ShardIndexKey,
     ).void
   }
   def initialize(testing_formulae, deleted_formulae, all_supported:, dependent_matrix: true,
                  shard_max_runners: DEFAULT_SHARD_MAX_RUNNERS,
+                 shard_max_runners_by_runner_type: {},
                  shard_min_items_per_runner: DEFAULT_SHARD_MIN_ITEMS_PER_RUNNER,
+                 shard_min_items_per_runner_by_runner_type: {},
                  shard_runner_load_factor: DEFAULT_SHARD_RUNNER_LOAD_FACTOR,
+                 shard_runner_load_factor_by_runner_type: {},
                  shard_count_key: DEFAULT_SHARD_COUNT_KEY,
                  shard_index_key: DEFAULT_SHARD_INDEX_KEY)
     if shard_max_runners < MIN_SHARD_COUNT
@@ -72,9 +98,18 @@ class ShardedRunnerMatrix < GitHubRunnerMatrix
       raise ArgumentError, "shard_runner_load_factor must be greater than 0 and less than or equal to 1."
     end
 
+    validate_integer_runner_type_overrides!(shard_max_runners_by_runner_type, "shard_max_runners_by_runner_type")
+    validate_integer_runner_type_overrides!(shard_min_items_per_runner_by_runner_type,
+                                            "shard_min_items_per_runner_by_runner_type")
+    validate_float_runner_type_overrides!(shard_runner_load_factor_by_runner_type,
+                                          "shard_runner_load_factor_by_runner_type")
+
     @shard_max_runners = shard_max_runners
+    @shard_max_runners_by_runner_type = shard_max_runners_by_runner_type
     @shard_min_items_per_runner = shard_min_items_per_runner
+    @shard_min_items_per_runner_by_runner_type = shard_min_items_per_runner_by_runner_type
     @shard_runner_load_factor = shard_runner_load_factor
+    @shard_runner_load_factor_by_runner_type = shard_runner_load_factor_by_runner_type
     @shard_count_key = shard_count_key
     @shard_index_key = shard_index_key
 
@@ -112,10 +147,26 @@ class ShardedRunnerMatrix < GitHubRunnerMatrix
   }
   def shard_count_for_runner(runner, item_count_by_runner)
     item_count = item_count_by_runner.fetch(runner, 0)
-    effective_min_items = @shard_min_items_per_runner * @shard_runner_load_factor
+    shard_min_items_per_runner = integer_runner_setting(
+      runner,
+      @shard_min_items_per_runner,
+      @shard_min_items_per_runner_by_runner_type,
+    )
+    shard_runner_load_factor = float_runner_setting(
+      runner,
+      @shard_runner_load_factor,
+      @shard_runner_load_factor_by_runner_type,
+    )
+    shard_max_runners = integer_runner_setting(
+      runner,
+      @shard_max_runners,
+      @shard_max_runners_by_runner_type,
+    )
+
+    effective_min_items = shard_min_items_per_runner * shard_runner_load_factor
     shard_count = (item_count / effective_min_items).floor
     shard_count = MIN_SHARD_COUNT if shard_count < MIN_SHARD_COUNT
-    [shard_count, @shard_max_runners].min
+    [shard_count, shard_max_runners].min
   end
 
   sig { params(spec_hash: RunnerSpecHash, shard_count: Integer).returns(T::Array[RunnerSpecHash]) }
@@ -125,6 +176,45 @@ class ShardedRunnerMatrix < GitHubRunnerMatrix
         @shard_count_key.serialize => shard_count,
         @shard_index_key.serialize => shard_index,
       )
+    end
+  end
+
+  sig { params(runner: GitHubRunner).returns(String) }
+  def runner_type_key(runner)
+    "#{runner.platform}-#{runner.arch}"
+  end
+
+  sig { params(runner: GitHubRunner, default_value: Integer, overrides: T::Hash[String, Integer]).returns(Integer) }
+  def integer_runner_setting(runner, default_value, overrides)
+    overrides.fetch(runner_type_key(runner), default_value)
+  end
+
+  sig { params(runner: GitHubRunner, default_value: Float, overrides: T::Hash[String, Float]).returns(Float) }
+  def float_runner_setting(runner, default_value, overrides)
+    overrides.fetch(runner_type_key(runner), default_value)
+  end
+
+  sig { params(overrides: T::Hash[String, Integer], setting_name: String).void }
+  def validate_integer_runner_type_overrides!(overrides, setting_name)
+    overrides.each do |runner_type_key, value|
+      unless self.class.valid_runner_type_key?(runner_type_key)
+        raise ArgumentError, "#{setting_name} has an unknown runner type: #{runner_type_key.inspect}."
+      end
+      if value < MIN_SHARD_COUNT
+        raise ArgumentError, "#{setting_name} values must be integers greater than or equal to 1."
+      end
+    end
+  end
+
+  sig { params(overrides: T::Hash[String, Float], setting_name: String).void }
+  def validate_float_runner_type_overrides!(overrides, setting_name)
+    overrides.each do |runner_type_key, value|
+      unless self.class.valid_runner_type_key?(runner_type_key)
+        raise ArgumentError, "#{setting_name} has an unknown runner type: #{runner_type_key.inspect}."
+      end
+      unless self.class.valid_shard_runner_load_factor?(value)
+        raise ArgumentError, "#{setting_name} values must be greater than 0 and less than or equal to 1."
+      end
     end
   end
 end

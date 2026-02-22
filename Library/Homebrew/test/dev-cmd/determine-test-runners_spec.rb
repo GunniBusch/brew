@@ -112,6 +112,24 @@ RSpec.describe Homebrew::DevCmd::DetermineTestRunners do
     end.to output(/must be a number greater than 0 and less than or equal to 1/).to_stderr
                                                                                 .and be_a_failure
   end
+
+  it "rejects unknown runner types in dependent shard overrides", :integration_test do
+    expect do
+      brew "determine-test-runners", "testball", "--dependents", "--eval-all",
+           "--dependent-shard-max-runners=linux-riscv64=2",
+           runner_env.merge({ "GITHUB_OUTPUT" => github_output })
+    end.to output(/unknown runner type/i).to_stderr
+                                         .and be_a_failure
+  end
+
+  it "rejects multiple global values in dependent shard overrides", :integration_test do
+    expect do
+      brew "determine-test-runners", "testball", "--dependents", "--eval-all",
+           "--dependent-shard-max-runners=2,3",
+           runner_env.merge({ "GITHUB_OUTPUT" => github_output })
+    end.to output(/can only include one global value/).to_stderr
+                                                      .and be_a_failure
+  end
 end
 
 # Generates a unique index for temporary test files.

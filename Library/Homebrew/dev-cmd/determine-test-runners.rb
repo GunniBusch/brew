@@ -9,6 +9,16 @@ require "sharded_runner_matrix"
 module Homebrew
   module DevCmd
     class DetermineTestRunners < AbstractCommand
+      class ParsedIntegerShardOption < T::Struct
+        const :global_value, Integer
+        const :runner_overrides, T::Hash[String, Integer]
+      end
+
+      class ParsedFloatShardOption < T::Struct
+        const :global_value, Float
+        const :runner_overrides, T::Hash[String, Float]
+      end
+
       cmd_args do
         usage_banner <<~EOS
           `determine-test-runners` {<testing-formulae> [<deleted-formulae>]|--all-supported}
@@ -26,13 +36,19 @@ module Homebrew
                             "Requires `--eval-all` or `HOMEBREW_EVAL_ALL=1` to be set.",
                depends_on:  "--eval-all"
         flag "--dependent-shard-max-runners=",
-             description: "Maximum number of dependent shards per active runner when using `--dependents`.",
+             description: "Maximum dependent shards when using `--dependents`. Accepts either a single value " \
+                          "or comma-separated per-runner overrides (e.g. " \
+                          "`linux-x86_64=4,macos-arm64=2`).",
              depends_on:  "--dependents"
         flag "--dependent-shard-min-dependents-per-runner=",
-             description: "Minimum number of dependent formulae per shard when using `--dependents`.",
+             description: "Minimum dependent formulae per shard when using `--dependents`. Accepts either a " \
+                          "single value or comma-separated per-runner overrides (e.g. " \
+                          "`linux-x86_64=200,macos-arm64=100`).",
              depends_on:  "--dependents"
         flag "--dependent-shard-runner-load-factor=",
-             description: "Minimum load ratio per shard (0,1] used when expanding dependent shards.",
+             description: "Minimum shard load ratio (0,1] when expanding dependents. Accepts either a single " \
+                          "value or comma-separated per-runner overrides (e.g. " \
+                          "`linux-x86_64=0.8,macos-arm64=0.6`).",
              depends_on:  "--dependents"
 
         named_args max: 2
@@ -69,9 +85,12 @@ module Homebrew
           dependent_matrix: args.dependents?,
         }
         if args.dependents?
-          runner_matrix_args[:shard_max_runners] = shard_max_runners
-          runner_matrix_args[:shard_min_items_per_runner] = shard_min_items_per_runner
-          runner_matrix_args[:shard_runner_load_factor] = shard_runner_load_factor
+          runner_matrix_args[:shard_max_runners] = shard_max_runners.global_value
+          runner_matrix_args[:shard_max_runners_by_runner_type] = shard_max_runners.runner_overrides
+          runner_matrix_args[:shard_min_items_per_runner] = shard_min_items_per_runner.global_value
+          runner_matrix_args[:shard_min_items_per_runner_by_runner_type] = shard_min_items_per_runner.runner_overrides
+          runner_matrix_args[:shard_runner_load_factor] = shard_runner_load_factor.global_value
+          runner_matrix_args[:shard_runner_load_factor_by_runner_type] = shard_runner_load_factor.runner_overrides
           runner_matrix_args[:shard_count_key] = ShardedRunnerMatrix::ShardCountKey::DependentShardCount
           runner_matrix_args[:shard_index_key] = ShardedRunnerMatrix::ShardIndexKey::DependentShardIndex
         end
@@ -96,7 +115,7 @@ module Homebrew
 
       private
 
-      sig { returns(Integer) }
+      sig { returns(ParsedIntegerShardOption) }
       def dependent_shard_max_runners_value
         parse_positive_integer_option(
           args.dependent_shard_max_runners,
@@ -105,7 +124,7 @@ module Homebrew
         )
       end
 
-      sig { returns(Integer) }
+      sig { returns(ParsedIntegerShardOption) }
       def dependent_shard_min_dependents_per_runner_value
         parse_positive_integer_option(
           args.dependent_shard_min_dependents_per_runner,
@@ -114,7 +133,7 @@ module Homebrew
         )
       end
 
-      sig { returns(Float) }
+      sig { returns(ParsedFloatShardOption) }
       def dependent_shard_runner_load_factor_value
         parse_load_factor_option(
           args.dependent_shard_runner_load_factor,
@@ -123,22 +142,115 @@ module Homebrew
         )
       end
 
-      sig { params(raw_value: T.nilable(String), flag_name: String, default_value: Integer).returns(Integer) }
+      sig {
+        params(
+          raw_value:     T.nilable(String),
+          flag_name:     String,
+          default_value: Integer,
+        ).returns(ParsedIntegerShardOption)
+      }
       def parse_positive_integer_option(raw_value, flag_name, default_value:)
-        value = raw_value.presence || default_value.to_s
-        parsed_value = T.let(Integer(value, exception: false), T.nilable(Integer))
-        return parsed_value if parsed_value && parsed_value >= 1
+        return ParsedIntegerShardOption.new(global_value: default_value, runner_overrides: {}) if raw_value.blank?
 
-        raise UsageError, "`#{flag_name}` must be an integer greater than or equal to 1."
+        global_value = T.let(default_value, Integer)
+        has_global_override = T.let(false, T::Boolean)
+        runner_overrides = T.let({}, T::Hash[String, Integer])
+
+        parse_option_entries(raw_value, flag_name).each do |entry|
+          if entry.include?("=")
+            runner_type_key, raw_entry_value = parse_runner_override_entry(entry, flag_name)
+            parsed_value = T.let(Integer(raw_entry_value, exception: false), T.nilable(Integer))
+            if parsed_value.nil? || parsed_value < 1
+              raise UsageError, "`#{flag_name}` values must be integers greater than or equal to 1."
+            end
+
+            runner_overrides[runner_type_key] = parsed_value
+            next
+          end
+
+          raise UsageError, "`#{flag_name}` can only include one global value." if has_global_override
+
+          parsed_value = T.let(Integer(entry, exception: false), T.nilable(Integer))
+          if parsed_value.nil? || parsed_value < 1
+            raise UsageError, "`#{flag_name}` must be an integer greater than or equal to 1."
+          end
+
+          global_value = parsed_value
+          has_global_override = true
+        end
+
+        ParsedIntegerShardOption.new(global_value:, runner_overrides:)
       end
 
-      sig { params(raw_value: T.nilable(String), flag_name: String, default_value: Float).returns(Float) }
+      sig {
+        params(
+          raw_value:     T.nilable(String),
+          flag_name:     String,
+          default_value: Float,
+        ).returns(ParsedFloatShardOption)
+      }
       def parse_load_factor_option(raw_value, flag_name, default_value:)
-        value = raw_value.presence || default_value.to_s
-        parsed_value = T.let(Float(value, exception: false), T.nilable(Float))
-        return parsed_value if parsed_value && ShardedRunnerMatrix.valid_shard_runner_load_factor?(parsed_value)
+        return ParsedFloatShardOption.new(global_value: default_value, runner_overrides: {}) if raw_value.blank?
 
-        raise UsageError, "`#{flag_name}` must be a number greater than 0 and less than or equal to 1."
+        global_value = T.let(default_value, Float)
+        has_global_override = T.let(false, T::Boolean)
+        runner_overrides = T.let({}, T::Hash[String, Float])
+
+        parse_option_entries(raw_value, flag_name).each do |entry|
+          if entry.include?("=")
+            runner_type_key, raw_entry_value = parse_runner_override_entry(entry, flag_name)
+            parsed_value = T.let(Float(raw_entry_value, exception: false), T.nilable(Float))
+            if parsed_value.nil? || !ShardedRunnerMatrix.valid_shard_runner_load_factor?(parsed_value)
+              raise UsageError, "`#{flag_name}` values must be numbers greater than 0 and less than or equal to 1."
+            end
+
+            runner_overrides[runner_type_key] = parsed_value
+            next
+          end
+
+          raise UsageError, "`#{flag_name}` can only include one global value." if has_global_override
+
+          parsed_value = T.let(Float(entry, exception: false), T.nilable(Float))
+          if parsed_value.nil? || !ShardedRunnerMatrix.valid_shard_runner_load_factor?(parsed_value)
+            raise UsageError, "`#{flag_name}` must be a number greater than 0 and less than or equal to 1."
+          end
+
+          global_value = parsed_value
+          has_global_override = true
+        end
+
+        ParsedFloatShardOption.new(global_value:, runner_overrides:)
+      end
+
+      sig { params(raw_value: String, flag_name: String).returns(T::Array[String]) }
+      def parse_option_entries(raw_value, flag_name)
+        entries = raw_value.split(",").map(&:strip).reject(&:empty?)
+        raise UsageError, "`#{flag_name}` cannot be empty." if entries.empty?
+
+        entries
+      end
+
+      sig { params(entry: String, flag_name: String).returns([String, String]) }
+      def parse_runner_override_entry(entry, flag_name)
+        runner_type_key, raw_entry_value = entry.split("=", 2)
+        runner_type_key = runner_type_key.to_s.strip
+        raw_entry_value = raw_entry_value.to_s.strip
+
+        validate_runner_type_key!(runner_type_key, flag_name)
+        if raw_entry_value.empty?
+          raise UsageError, "`#{flag_name}` runner overrides must include a value (e.g. `linux-x86_64=2`)."
+        end
+
+        [runner_type_key, raw_entry_value]
+      end
+
+      sig { params(runner_type_key: String, flag_name: String).void }
+      def validate_runner_type_key!(runner_type_key, flag_name)
+        return if ShardedRunnerMatrix.valid_runner_type_key?(runner_type_key)
+
+        valid_keys = ShardedRunnerMatrix.runner_type_keys.join(", ")
+        raise UsageError,
+              "`#{flag_name}` has unknown runner type `#{runner_type_key}`. Valid runner types: #{valid_keys}."
       end
     end
   end
